@@ -5,12 +5,13 @@ import { Canvas, useFrame, ThreeEvent, useThree } from '@react-three/fiber'
 import { OrbitControls, Line, Text } from '@react-three/drei'
 import * as THREE from 'three'
 import { supabase } from '@/lib/supabase'
-import { useStrategyStore, MODE_CONFIG, useDoomsdayStore, type ParsedCubeSpec } from '@/lib/store'
+import { useStrategyStore, MODE_CONFIG, useDoomsdayStore, useAIStore, type ParsedCubeSpec } from '@/lib/store'
 import EfficiencyHUD from '@/components/hud/EfficiencyHUD'
 import StrategySlider from '@/components/hud/StrategySlider'
 import OracleSystem, { type OracleResult } from '@/components/hud/OracleSystem'
 import AutoRouteButton, { type RoutePhase } from '@/components/hud/AutoRouteButton'
 import InboxPanel from '@/components/inbox/InboxPanel'
+import AIControlDeck, { type CubeContextData } from '@/components/ai/AIControlDeck'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -673,6 +674,7 @@ export default function Board() {
   // ── Strategy & Efficiency (Zustand) ──────────────────────────────────────────
   const { modeIndex } = useStrategyStore()
   const { preMortemData, isDoomsdayActive, setIsDoomsdayActive } = useDoomsdayStore()
+  const { setSelectedCubeId } = useAIStore()
 
   const efficiencyData = useMemo(() => {
     const modeWeight = MODE_CONFIG[modeIndex].weight
@@ -752,6 +754,7 @@ export default function Board() {
     const cube = cubes.find(c => c.id === cubeId)
     if (!cube) return
     setSelectedFaceInfo({ cubeId, face })
+    setSelectedCubeId(cubeId)
     setEditText((cube[face.toLowerCase() as keyof CubeRow] as string) ?? '')
     setSaveStatus('idle')
   }
@@ -785,7 +788,7 @@ export default function Board() {
     if (error) { setSaveStatus('error') } else {
       setCubes(p => p.map(c => c.id === selectedFaceInfo.cubeId ? { ...c, [col]: editText } : c))
       setSaveStatus('saved')
-      setTimeout(() => { setSaveStatus('idle'); setSelectedFaceInfo(null) }, 800)
+      setTimeout(() => { setSaveStatus('idle'); setSelectedFaceInfo(null); setSelectedCubeId(null) }, 800)
     }
   }
 
@@ -1002,6 +1005,67 @@ export default function Board() {
     }
   }, [cubes.length])
 
+  // ── AI Control Deck 데이터 준비 ──────────────────────────────────────────────
+
+  /** Critical Path 상의 큐브를 AIControlDeck 컨텍스트 형식으로 변환 */
+  const criticalPathCubeData: CubeContextData[] = useMemo(() =>
+    criticalPath
+      .map(id => cubes.find(c => c.id === id))
+      .filter((c): c is CubeRow => !!c)
+      .map(c => ({
+        name:       c.identity ?? '',
+        green:      c.output   ?? '',
+        yellow:     c.input    ?? '',
+        red:        c.barrier  ?? '',
+        blue:       c.logic    ?? '',
+        risk:       c.risk,
+        position_x: c.position_x,
+        position_y: c.position_y,
+        position_z: c.position_z,
+      })),
+  [criticalPath, cubes])
+
+  /** 현재 선택된 큐브의 컨텍스트 (Lateral Jump용) */
+  const selectedCubeForAI: CubeContextData | null = useMemo(() => {
+    const cube = selectedFaceInfo ? cubes.find(c => c.id === selectedFaceInfo.cubeId) : null
+    if (!cube) return null
+    return {
+      name:       cube.identity ?? '',
+      green:      cube.output   ?? '',
+      yellow:     cube.input    ?? '',
+      red:        cube.barrier  ?? '',
+      blue:       cube.logic    ?? '',
+      risk:       cube.risk,
+      position_x: cube.position_x,
+      position_y: cube.position_y,
+      position_z: cube.position_z,
+    }
+  }, [selectedFaceInfo, cubes])
+
+  /** AI가 생성한 큐브 소환 — 위치와 모드별 risk 설정 포함 */
+  const handleSpawnAICube = useCallback(async (
+    spec: ParsedCubeSpec,
+    pos: { x: number; y: number; z: number },
+    mode: 'A' | 'B'
+  ) => {
+    const { data } = await supabase.from('cubes').insert({
+      board_id:   BOARD_ID,
+      position_x: pos.x,
+      position_y: pos.y,
+      position_z: pos.z,
+      identity:   spec.name    ?? '',
+      output:     spec.green   ?? '',
+      input:      spec.yellow  ?? '',
+      barrier:    spec.red     ?? '',
+      logic:      spec.blue    ?? '',
+      history:    '',
+      is_root:    false,
+      is_goal:    false,
+      risk:       mode === 'A' ? 0.75 : 0.25,  // Red Team은 높은 risk, Lateral은 낮은 risk
+    }).select().single()
+    if (data) setCubes(p => [...p, data as CubeRow])
+  }, [])
+
   // ── 렌더 ──────────────────────────────────────────────────────────────────
 
   if (isLoading) {
@@ -1103,13 +1167,18 @@ export default function Board() {
       {/* ── Strategy Spectrum Slider ── */}
       <StrategySlider />
 
-      {/* ── Oracle Sync System + Auto-Route (우측 상단 스택) ── */}
-      <div style={{ position: 'absolute', top: 20, right: 20, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+      {/* ── Oracle Sync + Auto-Route + AI Control Deck (우측 상단 스택) ── */}
+      <div style={{ position: 'absolute', top: 20, right: 20, zIndex: 10, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
         <OracleSystem onSync={handleOracleSync} embedded />
         <AutoRouteButton
           phase={routePhase}
           errorMsg={routeError}
           onClick={handleAutoRoute}
+        />
+        <AIControlDeck
+          criticalPathCubes={criticalPathCubeData}
+          selectedCube={selectedCubeForAI}
+          onSpawnAICube={handleSpawnAICube}
         />
       </div>
 

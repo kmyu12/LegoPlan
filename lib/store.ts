@@ -61,3 +61,21 @@ export const useDoomsdayStore = create<DoomsdayStore>((set) => ({
   setIsDoomsdayActive:(v)     => set({ isDoomsdayActive: v }),
   resetDoomsday:      ()      => set({ isDoomsdayActive: false, preMortemData: null }),
 }))
+
+// ─── AI Editology Store ──────────────────────────────────────────────────────
+
+interface AIStore {
+  selectedCubeId:    string | null
+  isAILoading:       boolean
+  aiMode:            'A' | 'B' | null  // 현재 실행 중인 모드
+  setSelectedCubeId: (id: string | null) => void
+  setIsAILoading:    (v: boolean, mode?: 'A' | 'B' | null) => void
+}
+
+export const useAIStore = create<AIStore>((set) => ({
+  selectedCubeId:    null,
+  isAILoading:       false,
+  aiMode:            null,
+  setSelectedCubeId: (id)         => set({ selectedCubeId: id }),
+  setIsAILoading:    (v, mode)    => set({ isAILoading: v, aiMode: v ? (mode ?? null) : null }),
+}))
