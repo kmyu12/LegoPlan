@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Canvas, useFrame, ThreeEvent, useThree } from '@react-three/fiber'
 import { OrbitControls, Line, Text } from '@react-three/drei'
 import * as THREE from 'three'
@@ -22,6 +22,9 @@ interface CubeRow {
   logic: string
   identity: string
   history: string
+  is_root: boolean
+  is_goal: boolean
+  risk: number
 }
 
 interface ConnRow {
@@ -64,12 +67,12 @@ const FACE_NORMALS: Record<FaceLabel, THREE.Vector3> = {
 }
 
 const FACE_META: Record<FaceLabel, { title: string; placeholder: string; emoji: string }> = {
-  OUTPUT:   { emoji: '🟢', title: '앞면 — Output (Green)',   placeholder: '내가 가진 기술, 자원, 공급할 수 있는 것을 적어...' },
-  INPUT:    { emoji: '🟡', title: '뒷면 — Input (Yellow)',   placeholder: '상대방이 원하는 것, 내가 필요한 것을 적어...' },
-  BARRIER:  { emoji: '🔴', title: '왼면 — Barrier (Red)',    placeholder: '해결해야 할 문제, 규제, 리스크를 적어...' },
-  LOGIC:    { emoji: '🔵', title: '오른면 — Logic (Blue)',   placeholder: 'A와 B를 잇는 전략적 근거를 적어...' },
-  IDENTITY: { emoji: '⚪', title: '윗면 — Identity (White)', placeholder: '이 블록의 이름과 핵심 정의를 적어...' },
-  HISTORY:  { emoji: '⚫', title: '밑면 — History (Black)',  placeholder: '증거 데이터, 과거 지표를 적어...' },
+  OUTPUT:   { emoji: '🟢', title: '앞면 — Output',   placeholder: '내가 가진 기술, 자원, 공급할 수 있는 것을 적어...' },
+  INPUT:    { emoji: '🟡', title: '뒷면 — Input',    placeholder: '상대방이 원하는 것, 내가 필요한 것을 적어...' },
+  BARRIER:  { emoji: '🔴', title: '왼면 — Barrier',  placeholder: '해결해야 할 문제, 규제, 리스크를 적어...' },
+  LOGIC:    { emoji: '🔵', title: '오른면 — Logic',  placeholder: 'A와 B를 잇는 전략적 근거를 적어...' },
+  IDENTITY: { emoji: '⚪', title: '윗면 — Identity', placeholder: '이 블록의 이름과 핵심 정의를 적어...' },
+  HISTORY:  { emoji: '⚫', title: '밑면 — History',  placeholder: '증거 데이터, 과거 지표를 적어...' },
 }
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
@@ -83,21 +86,84 @@ function getPortWorldPos(cube: CubeRow, face: FaceLabel): THREE.Vector3 {
   )
 }
 
-function getSpawnPos(idx: number): { x: number; y: number; z: number } {
-  const col = idx % 3
-  const row = Math.floor(idx / 3)
-  return { x: col * 6, y: 0, z: row * 6 }
+function getSpawnPos(idx: number) {
+  return { x: (idx % 3) * 6, y: 0, z: Math.floor(idx / 3) * 6 }
 }
 
-// ─── Port (connection sphere on each face) ────────────────────────────────────
+// ─── Graph Logic ──────────────────────────────────────────────────────────────
 
-function Port({
-  faceLabel,
-  cubeId,
-  isConnecting,
-  isSource,
-  onPortClick,
-}: {
+/**
+ * 활성화 상태 계산:
+ * - is_root 큐브는 항상 활성
+ * - 들어오는 연결이 없는 큐브도 활성
+ * - 나머지: 모든 선행 큐브(predecessor)가 활성이어야 활성 (AND 조건)
+ */
+function computeActiveStates(cubes: CubeRow[], conns: ConnRow[]): Set<string> {
+  const active = new Set<string>()
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const cube of cubes) {
+      if (active.has(cube.id)) continue
+      const incoming = conns.filter(c => c.to_cube_id === cube.id)
+      const ok = cube.is_root
+        || incoming.length === 0
+        || incoming.every(c => active.has(c.from_cube_id))
+      if (ok) { active.add(cube.id); changed = true }
+    }
+  }
+  return active
+}
+
+/** 사이클 방지 DFS: from → to 까지의 모든 경로 반환 */
+function findAllPaths(
+  from: string, to: string,
+  conns: ConnRow[], visited: Set<string>
+): string[][] {
+  if (from === to) return [[to]]
+  if (visited.has(from)) return []
+  const paths: string[][] = []
+  for (const c of conns.filter(c => c.from_cube_id === from)) {
+    for (const sub of findAllPaths(c.to_cube_id, to, conns, new Set([...visited, from]))) {
+      paths.push([from, ...sub])
+    }
+  }
+  return paths
+}
+
+/**
+ * Critical Path 알고리즘:
+ * ROOT → GOAL 까지의 모든 경로 중 risk 합계가 가장 높은 경로를 반환
+ */
+function computeCriticalPath(cubes: CubeRow[], conns: ConnRow[]): string[] {
+  const goal  = cubes.find(c => c.is_goal)
+  const roots = cubes.filter(c => c.is_root)
+  if (!goal || roots.length === 0) return []
+  const riskOf = Object.fromEntries(cubes.map(c => [c.id, c.risk]))
+  let maxRisk = -Infinity
+  let result: string[] = []
+  for (const root of roots) {
+    for (const path of findAllPaths(root.id, goal.id, conns, new Set())) {
+      const total = path.reduce((s, id) => s + (riskOf[id] ?? 0), 0)
+      if (total > maxRisk) { maxRisk = total; result = path }
+    }
+  }
+  return result
+}
+
+/** Critical Path에 포함된 연결선 ID 집합 */
+function getCriticalConnIds(path: string[], conns: ConnRow[]): Set<string> {
+  const ids = new Set<string>()
+  for (let i = 0; i < path.length - 1; i++) {
+    const c = conns.find(c => c.from_cube_id === path[i] && c.to_cube_id === path[i + 1])
+    if (c) ids.add(c.id)
+  }
+  return ids
+}
+
+// ─── Port ─────────────────────────────────────────────────────────────────────
+
+function Port({ faceLabel, cubeId, isConnecting, isSource, onPortClick }: {
   faceLabel: FaceLabel
   cubeId: string
   isConnecting: boolean
@@ -109,17 +175,13 @@ function Port({
 
   useFrame((_, dt) => {
     if (!ref.current) return
-    const target = hovered || isSource ? 1.5 : 1.0
-    ref.current.scale.lerp(new THREE.Vector3(target, target, target), dt * 8)
+    const t = hovered || isSource ? 1.5 : 1.0
+    ref.current.scale.lerp(new THREE.Vector3(t, t, t), dt * 8)
   })
 
-  const color = isSource
-    ? '#6366f1'
-    : hovered && isConnecting
-    ? '#22c55e'
-    : faceLabel === 'IDENTITY'
-    ? '#0f172a'
-    : '#ffffff'
+  const color = isSource ? '#6366f1'
+    : hovered && isConnecting ? '#22c55e'
+    : faceLabel === 'IDENTITY' ? '#0f172a' : '#ffffff'
 
   return (
     <mesh
@@ -137,16 +199,11 @@ function Port({
 
 // ─── FacePlane ────────────────────────────────────────────────────────────────
 
-function FacePlane({
-  config,
-  cubeId,
-  connecting,
-  onFaceClick,
-  onPortClick,
-}: {
+function FacePlane({ config, cubeId, connecting, isActive, onFaceClick, onPortClick }: {
   config: typeof FACE_CONFIG[0]
   cubeId: string
   connecting: ConnectingState | null
+  isActive: boolean
   onFaceClick: (cubeId: string, face: FaceLabel) => void
   onPortClick: (cubeId: string, face: FaceLabel) => void
 }) {
@@ -165,13 +222,14 @@ function FacePlane({
           color={config.color}
           roughness={0.85}
           metalness={0}
+          transparent
+          opacity={isActive ? 1 : 0.2}
           polygonOffset
           polygonOffsetFactor={-1}
           polygonOffsetUnits={-1}
         />
       </mesh>
 
-      {/* 연결 포트 */}
       <Port
         faceLabel={config.label as FaceLabel}
         cubeId={cubeId}
@@ -181,22 +239,16 @@ function FacePlane({
       />
 
       <Text
-        position={[0, 0.5, 0.01]}
-        fontSize={0.2}
-        color={config.label === 'IDENTITY' ? '#0f172a' : '#ffffff'}
-        anchorX="center"
-        anchorY="middle"
-        letterSpacing={0.05}
+        position={[0, 0.5, 0.01]} fontSize={0.2}
+        color={config.label === 'IDENTITY' ? (isActive ? '#0f172a' : '#1e293b') : (isActive ? '#ffffff' : '#374151')}
+        anchorX="center" anchorY="middle" letterSpacing={0.05}
       >
         {config.label}
       </Text>
       <Text
-        position={[0, 0.22, 0.01]}
-        fontSize={0.13}
-        color={config.label === 'IDENTITY' ? '#334155' : '#e2e8f0'}
-        anchorX="center"
-        anchorY="middle"
-        letterSpacing={0.02}
+        position={[0, 0.22, 0.01]} fontSize={0.13}
+        color={config.label === 'IDENTITY' ? (isActive ? '#334155' : '#1e293b') : (isActive ? '#e2e8f0' : '#2d3748')}
+        anchorX="center" anchorY="middle" letterSpacing={0.02}
       >
         {config.sub}
       </Text>
@@ -206,29 +258,64 @@ function FacePlane({
 
 // ─── CubeInstance ─────────────────────────────────────────────────────────────
 
-function CubeInstance({
-  cube,
-  connecting,
-  onFaceClick,
-  onPortClick,
-}: {
+function CubeInstance({ cube, connecting, isActive, isOnCritPath, onFaceClick, onPortClick }: {
   cube: CubeRow
   connecting: ConnectingState | null
+  isActive: boolean
+  isOnCritPath: boolean
   onFaceClick: (cubeId: string, face: FaceLabel) => void
   onPortClick: (cubeId: string, face: FaceLabel) => void
 }) {
   return (
     <group position={[cube.position_x, cube.position_y, cube.position_z]}>
+      {/* 큐브 본체 */}
       <mesh>
         <boxGeometry args={[2, 2, 2]} />
-        <meshStandardMaterial color="#0f172a" roughness={0.9} metalness={0} />
+        <meshStandardMaterial color={isActive ? '#0f172a' : '#07070f'} roughness={0.9} metalness={0} />
       </mesh>
+
+      {/* ROOT 표시 — 초록 링 */}
+      {cube.is_root && (
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[1.58, 0.055, 8, 48]} />
+          <meshStandardMaterial color="#22c55e" roughness={0.5} metalness={0} />
+        </mesh>
+      )}
+
+      {/* GOAL 표시 — 금색 링 */}
+      {cube.is_goal && (
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[1.7, 0.055, 8, 48]} />
+          <meshStandardMaterial color="#f59e0b" roughness={0.5} metalness={0} />
+        </mesh>
+      )}
+
+      {/* Critical Path 표시 — 빨간 링 */}
+      {isOnCritPath && (
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[1.82, 0.04, 8, 48]} />
+          <meshStandardMaterial color="#ef4444" roughness={0.5} metalness={0} />
+        </mesh>
+      )}
+
+      {/* 비활성 잠금 오버레이 */}
+      {!isActive && (
+        <mesh scale={[1.005, 1.005, 1.005]}>
+          <boxGeometry args={[2, 2, 2]} />
+          <meshStandardMaterial
+            color="#000000" transparent opacity={0.6}
+            depthWrite={false} side={THREE.BackSide}
+          />
+        </mesh>
+      )}
+
       {FACE_CONFIG.map(face => (
         <FacePlane
           key={face.label}
           config={face}
           cubeId={cube.id}
           connecting={connecting}
+          isActive={isActive}
           onFaceClick={onFaceClick}
           onPortClick={onPortClick}
         />
@@ -237,7 +324,7 @@ function CubeInstance({
   )
 }
 
-// ─── DragLine: 연결 중 마우스를 따라다니는 임시 선 ───────────────────────────
+// ─── DragLine ─────────────────────────────────────────────────────────────────
 
 const DRAG_PLANE = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
 
@@ -249,9 +336,9 @@ function DragLine({ connecting }: { connecting: ConnectingState | null }) {
     if (!connecting) return
     const el = gl.domElement
     const onMove = (e: MouseEvent) => {
-      const rect = el.getBoundingClientRect()
-      const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1
-      const ny = -((e.clientY - rect.top) / rect.height) * 2 + 1
+      const r = el.getBoundingClientRect()
+      const nx = ((e.clientX - r.left) / r.width) * 2 - 1
+      const ny = -((e.clientY - r.top) / r.height) * 2 + 1
       raycaster.setFromCamera(new THREE.Vector2(nx, ny), camera)
       const hit = new THREE.Vector3()
       if (raycaster.ray.intersectPlane(DRAG_PLANE, hit)) setEnd(hit.clone())
@@ -261,78 +348,77 @@ function DragLine({ connecting }: { connecting: ConnectingState | null }) {
   }, [connecting, raycaster, camera, gl])
 
   if (!connecting) return null
-
   return (
     <Line
       points={[connecting.worldPos, end]}
-      color="#6366f1"
-      lineWidth={1.5}
-      dashed
-      dashScale={5}
-      dashSize={0.3}
-      gapSize={0.2}
+      color="#6366f1" lineWidth={1.5}
+      dashed dashScale={5} dashSize={0.3} gapSize={0.2}
     />
   )
 }
 
-// ─── Board (main export) ──────────────────────────────────────────────────────
+// ─── Board ────────────────────────────────────────────────────────────────────
 
 export default function Board() {
-  const [cubes, setCubes] = useState<CubeRow[]>([])
+  const [cubes, setCubes]           = useState<CubeRow[]>([])
   const [connections, setConnections] = useState<ConnRow[]>([])
-  const [isLoading, setIsLoading] = useState(true)
+  const [isLoading, setIsLoading]   = useState(true)
   const [selectedFaceInfo, setSelectedFaceInfo] = useState<{ cubeId: string; face: FaceLabel } | null>(null)
   const [connecting, setConnecting] = useState<ConnectingState | null>(null)
-  const [editText, setEditText] = useState('')
-  const [isSaving, setIsSaving] = useState(false)
+  const [editText, setEditText]     = useState('')
+  const [localRisk, setLocalRisk]   = useState(0.3)
+  const [isSaving, setIsSaving]     = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
 
-  // ── 초기 로드 + 실시간 구독 ────────────────────────────────────────────────
+  // ── Graph 계산 (메모이제이션) ────────────────────────────────────────────────
+  const activeSet       = useMemo(() => computeActiveStates(cubes, connections),        [cubes, connections])
+  const criticalPath    = useMemo(() => computeCriticalPath(cubes, connections),         [cubes, connections])
+  const criticalConnIds = useMemo(() => getCriticalConnIds(criticalPath, connections),   [criticalPath, connections])
+  const critPathSet     = useMemo(() => new Set(criticalPath),                           [criticalPath])
 
+  const selectedCube = selectedFaceInfo ? cubes.find(c => c.id === selectedFaceInfo.cubeId) : null
+
+  // ── 초기 로드 + 실시간 ─────────────────────────────────────────────────────
   useEffect(() => {
     const load = async () => {
-      const [{ data: cubeData }, { data: connData }] = await Promise.all([
+      const [{ data: cd }, { data: nd }] = await Promise.all([
         supabase.from('cubes').select('*').eq('board_id', BOARD_ID).order('created_at'),
         supabase.from('connections').select('*').eq('board_id', BOARD_ID),
       ])
-      if (cubeData) setCubes(cubeData)
-      if (connData)  setConnections(connData)
+      if (cd) setCubes(cd)
+      if (nd) setConnections(nd)
       setIsLoading(false)
     }
     load()
 
-    const cubeCh = supabase
-      .channel('cubes_rt')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'cubes' }, (payload) => {
-        if (payload.eventType === 'INSERT') setCubes(p => [...p, payload.new as CubeRow])
-        if (payload.eventType === 'UPDATE') setCubes(p => p.map(c => c.id === payload.new.id ? payload.new as CubeRow : c))
-        if (payload.eventType === 'DELETE') setCubes(p => p.filter(c => c.id !== (payload.old as CubeRow).id))
-      })
-      .subscribe()
+    const cubeCh = supabase.channel('cubes_rt')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cubes' }, ({ eventType, new: n, old: o }) => {
+        if (eventType === 'INSERT') setCubes(p => [...p, n as CubeRow])
+        if (eventType === 'UPDATE') setCubes(p => p.map(c => c.id === (n as CubeRow).id ? n as CubeRow : c))
+        if (eventType === 'DELETE') setCubes(p => p.filter(c => c.id !== (o as CubeRow).id))
+      }).subscribe()
 
-    const connCh = supabase
-      .channel('conns_rt')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'connections' }, (payload) => {
-        if (payload.eventType === 'INSERT') setConnections(p => [...p, payload.new as ConnRow])
-        if (payload.eventType === 'DELETE') setConnections(p => p.filter(c => c.id !== (payload.old as ConnRow).id))
-      })
-      .subscribe()
+    const connCh = supabase.channel('conns_rt')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'connections' }, ({ eventType, new: n, old: o }) => {
+        if (eventType === 'INSERT') setConnections(p => [...p, n as ConnRow])
+        if (eventType === 'DELETE') setConnections(p => p.filter(c => c.id !== (o as ConnRow).id))
+      }).subscribe()
 
-    return () => {
-      supabase.removeChannel(cubeCh)
-      supabase.removeChannel(connCh)
-    }
+    return () => { supabase.removeChannel(cubeCh); supabase.removeChannel(connCh) }
   }, [])
+
+  // selectedCube 바뀌면 localRisk 동기화
+  useEffect(() => {
+    if (selectedCube) setLocalRisk(selectedCube.risk ?? 0.3)
+  }, [selectedCube?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 핸들러 ────────────────────────────────────────────────────────────────
 
   const handleAddCube = async () => {
     const pos = getSpawnPos(cubes.length)
-    const { data } = await supabase
-      .from('cubes')
-      .insert({ board_id: BOARD_ID, position_x: pos.x, position_y: pos.y, position_z: pos.z })
-      .select()
-      .single()
+    const { data } = await supabase.from('cubes')
+      .insert({ board_id: BOARD_ID, ...pos, is_root: false, is_goal: false, risk: 0.3 })
+      .select().single()
     if (data) setCubes(p => [...p, data])
   }
 
@@ -347,54 +433,53 @@ export default function Board() {
 
   const handlePortClick = useCallback((cubeId: string, face: FaceLabel) => {
     setSelectedFaceInfo(null)
-
     if (!connecting) {
       const cube = cubes.find(c => c.id === cubeId)
       if (!cube) return
       setConnecting({ cubeId, face, worldPos: getPortWorldPos(cube, face) })
       return
     }
+    if (connecting.cubeId === cubeId && connecting.face === face) { setConnecting(null); return }
 
-    // 같은 포트 → 취소
-    if (connecting.cubeId === cubeId && connecting.face === face) {
-      setConnecting(null)
-      return
-    }
-
-    // 연결 생성
-    const create = async () => {
-      const { data } = await supabase.from('connections').insert({
-        board_id: BOARD_ID,
-        from_cube_id: connecting.cubeId,
-        from_face: connecting.face,
-        to_cube_id: cubeId,
-        to_face: face,
-      }).select().single()
-      if (data) setConnections(p => [...p, data])
-    }
-    create()
+    supabase.from('connections').insert({
+      board_id: BOARD_ID,
+      from_cube_id: connecting.cubeId, from_face: connecting.face,
+      to_cube_id: cubeId, to_face: face,
+    }).select().single().then(({ data }) => { if (data) setConnections(p => [...p, data]) })
     setConnecting(null)
   }, [connecting, cubes])
 
-  const handleSave = async () => {
+  const handleSaveFace = async () => {
     if (!selectedFaceInfo) return
     setIsSaving(true)
     const col = selectedFaceInfo.face.toLowerCase()
-    const { error } = await supabase
-      .from('cubes')
+    const { error } = await supabase.from('cubes')
       .update({ [col]: editText, updated_at: new Date().toISOString() })
       .eq('id', selectedFaceInfo.cubeId)
     setIsSaving(false)
-    if (error) {
-      setSaveStatus('error')
-    } else {
-      setCubes(p => p.map(c =>
-        c.id === selectedFaceInfo.cubeId ? { ...c, [col]: editText } : c
-      ))
+    if (error) { setSaveStatus('error') } else {
+      setCubes(p => p.map(c => c.id === selectedFaceInfo.cubeId ? { ...c, [col]: editText } : c))
       setSaveStatus('saved')
       setTimeout(() => { setSaveStatus('idle'); setSelectedFaceInfo(null) }, 800)
     }
   }
+
+  const toggleCubeProp = async (prop: 'is_root' | 'is_goal') => {
+    if (!selectedCube) return
+    const val = !selectedCube[prop]
+    await supabase.from('cubes').update({ [prop]: val }).eq('id', selectedCube.id)
+    setCubes(p => p.map(c => c.id === selectedCube.id ? { ...c, [prop]: val } : c))
+  }
+
+  const saveRisk = async (risk: number) => {
+    if (!selectedCube) return
+    await supabase.from('cubes').update({ risk }).eq('id', selectedCube.id)
+    setCubes(p => p.map(c => c.id === selectedCube.id ? { ...c, risk } : c))
+  }
+
+  // Critical Path 통계
+  const critTotalRisk = criticalPath.reduce((s, id) => s + (cubes.find(c => c.id === id)?.risk ?? 0), 0)
+  const critAvgRisk   = criticalPath.length > 0 ? (critTotalRisk / criticalPath.length) * 100 : 0
 
   // ── 렌더 ──────────────────────────────────────────────────────────────────
 
@@ -424,50 +509,54 @@ export default function Board() {
             key={cube.id}
             cube={cube}
             connecting={connecting}
+            isActive={activeSet.has(cube.id)}
+            isOnCritPath={critPathSet.has(cube.id)}
             onFaceClick={handleFaceClick}
             onPortClick={handlePortClick}
           />
         ))}
 
-        {/* 확정된 연결선 */}
         {connections.map(conn => {
           const from = cubes.find(c => c.id === conn.from_cube_id)
           const to   = cubes.find(c => c.id === conn.to_cube_id)
           if (!from || !to) return null
+          const isCrit = criticalConnIds.has(conn.id)
+          const fromActive = activeSet.has(conn.from_cube_id)
+          const toActive   = activeSet.has(conn.to_cube_id)
           return (
             <Line
               key={conn.id}
-              points={[
-                getPortWorldPos(from, conn.from_face as FaceLabel),
-                getPortWorldPos(to,   conn.to_face   as FaceLabel),
-              ]}
-              color="#6366f1"
-              lineWidth={2}
+              points={[getPortWorldPos(from, conn.from_face as FaceLabel), getPortWorldPos(to, conn.to_face as FaceLabel)]}
+              color={isCrit ? '#ef4444' : (fromActive && toActive) ? '#6366f1' : '#2d2d3d'}
+              lineWidth={isCrit ? 3 : (fromActive && toActive) ? 1.5 : 1}
             />
           )
         })}
 
-        {/* 드래그 중 임시 선 */}
         <DragLine connecting={connecting} />
-
-        <OrbitControls
-          enablePan
-          minDistance={3}
-          maxDistance={40}
-          enableRotate={!connecting}
-          enableZoom
-        />
+        <OrbitControls enablePan minDistance={3} maxDistance={40} enableRotate={!connecting} enableZoom />
       </Canvas>
 
-      {/* ── Add Cube 버튼 ── */}
+      {/* ── 범례 ── */}
+      <div
+        className="absolute top-5 left-5 rounded-xl px-3 py-2.5 text-xs border border-white/10 backdrop-blur space-y-1.5"
+        style={{ background: 'rgba(0,0,0,0.5)' }}
+      >
+        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-green-500 inline-block" /> ROOT (항상 활성)</div>
+        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-amber-500 inline-block" /> GOAL (목표 큐브)</div>
+        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-red-500 inline-block"   /> Critical Path</div>
+        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-slate-700 inline-block" /> 비활성 (선행조건 미충족)</div>
+      </div>
+
+      {/* ── Add Cube ── */}
       <button
         onClick={handleAddCube}
         className="absolute bottom-6 left-6 flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 active:scale-95 transition-all rounded-xl px-4 py-3 text-sm font-semibold shadow-lg"
       >
-        <span className="text-base">＋</span> Add Cube
+        <span>＋</span> Add Cube
       </button>
 
-      {/* ── 큐브 없을 때 안내 ── */}
+      {/* ── 큐브 없을 때 ── */}
       {cubes.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="text-center">
@@ -477,7 +566,7 @@ export default function Board() {
         </div>
       )}
 
-      {/* ── 연결 모드 안내 배너 ── */}
+      {/* ── 연결 모드 배너 ── */}
       {connecting && (
         <div
           className="absolute top-5 left-1/2 -translate-x-1/2 flex items-center gap-3 rounded-xl px-5 py-2.5 text-sm border border-indigo-500/40 backdrop-blur select-none"
@@ -485,12 +574,43 @@ export default function Board() {
         >
           <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
           <span className="text-indigo-300">연결할 다른 큐브의 포트를 클릭하세요</span>
-          <button
-            onClick={() => setConnecting(null)}
-            className="text-slate-500 hover:text-white transition-colors ml-1"
-          >
-            취소 (Esc)
-          </button>
+          <button onClick={() => setConnecting(null)} className="text-slate-500 hover:text-white ml-1">취소 (Esc)</button>
+        </div>
+      )}
+
+      {/* ── Critical Path 패널 ── */}
+      {criticalPath.length > 0 && (
+        <div
+          className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-xl px-5 py-3 border border-red-500/30 backdrop-blur text-xs max-w-lg"
+          style={{ background: 'rgba(239,68,68,0.07)' }}
+        >
+          <div className="flex items-center gap-2 text-red-400 font-semibold mb-2">
+            <span>⚠</span> Critical Path
+            <span className="ml-auto text-slate-400 font-normal">
+              평균 위험도: <span className="text-red-400 font-mono font-bold">{critAvgRisk.toFixed(0)}%</span>
+            </span>
+          </div>
+          <div className="flex items-center gap-1 flex-wrap">
+            {criticalPath.map((id, i) => {
+              const cube  = cubes.find(c => c.id === id)
+              const label = cube?.identity?.trim() || `Cube ${cubes.findIndex(c => c.id === id) + 1}`
+              const risk  = ((cube?.risk ?? 0) * 100).toFixed(0)
+              return (
+                <span key={id} className="flex items-center gap-1">
+                  {i > 0 && <span className="text-red-700">→</span>}
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-xs font-medium ${
+                      cube?.is_goal ? 'bg-amber-500/20 text-amber-300' :
+                      cube?.is_root ? 'bg-green-500/20 text-green-300' :
+                      'bg-slate-800 text-slate-300'
+                    }`}
+                  >
+                    {label} <span className="text-red-400 font-mono">{risk}%</span>
+                  </span>
+                </span>
+              )
+            })}
+          </div>
         </div>
       )}
 
@@ -501,25 +621,92 @@ export default function Board() {
         }`}
         style={{ background: '#1a1a1a' }}
       >
-        {selectedFaceInfo && !connecting && (
-          <div className="p-6 flex flex-col h-full">
-            <div className="flex items-center justify-between mb-4">
+        {selectedFaceInfo && !connecting && selectedCube && (
+          <div className="p-5 flex flex-col h-full gap-4 overflow-y-auto">
+
+            {/* ── Cube Settings ── */}
+            <div>
+              <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">
+                Cube Settings
+              </h3>
+
+              {/* ROOT / GOAL 토글 */}
+              <div className="flex gap-2 mb-4">
+                <button
+                  onClick={() => toggleCubeProp('is_root')}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${
+                    selectedCube.is_root
+                      ? 'bg-green-600 text-white ring-1 ring-green-400 shadow-green-900 shadow-md'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  style={{ background: selectedCube.is_root ? undefined : '#242424' }}
+                >
+                  ○ ROOT
+                </button>
+                <button
+                  onClick={() => toggleCubeProp('is_goal')}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${
+                    selectedCube.is_goal
+                      ? 'bg-amber-500 text-white ring-1 ring-amber-400 shadow-amber-900 shadow-md'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  style={{ background: selectedCube.is_goal ? undefined : '#242424' }}
+                >
+                  ◎ GOAL
+                </button>
+              </div>
+
+              {/* Risk Factor 슬라이더 */}
               <div>
-                <span className="text-2xl">{FACE_META[selectedFaceInfo.face].emoji}</span>
-                <h2 className="text-sm font-bold text-slate-200 mt-1">
-                  {FACE_META[selectedFaceInfo.face].title}
-                </h2>
+                <div className="flex justify-between text-xs mb-1.5">
+                  <span className="text-slate-400">Risk Factor</span>
+                  <span
+                    className="font-mono font-bold"
+                    style={{ color: `hsl(${(1 - localRisk) * 120}, 80%, 55%)` }}
+                  >
+                    {(localRisk * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <input
+                  type="range" min={0} max={1} step={0.05}
+                  value={localRisk}
+                  onChange={(e) => setLocalRisk(parseFloat(e.target.value))}
+                  onMouseUp={(e) => saveRisk(parseFloat((e.target as HTMLInputElement).value))}
+                  onTouchEnd={(e) => saveRisk(parseFloat((e.target as HTMLInputElement).value))}
+                  className="w-full h-1.5 rounded-full appearance-none cursor-pointer accent-red-500"
+                />
+                <div className="flex justify-between text-xs text-slate-600 mt-1">
+                  <span>안전 (0%)</span><span>위험 (100%)</span>
+                </div>
+              </div>
+
+              {/* 활성 상태 표시 */}
+              <div className="mt-3 flex items-center gap-2">
+                <span
+                  className={`w-2 h-2 rounded-full ${activeSet.has(selectedCube.id) ? 'bg-green-400' : 'bg-slate-600'}`}
+                />
+                <span className="text-xs text-slate-400">
+                  {activeSet.has(selectedCube.id) ? '활성 — 선행 조건 충족' : '비활성 — 선행 큐브 미연결'}
+                </span>
+              </div>
+            </div>
+
+            <div className="border-t border-white/10" />
+
+            {/* ── Face Editor ── */}
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-xl">{FACE_META[selectedFaceInfo.face].emoji}</span>
+                <h2 className="text-xs font-bold text-slate-200 mt-1">{FACE_META[selectedFaceInfo.face].title}</h2>
               </div>
               <button
                 onClick={() => setSelectedFaceInfo(null)}
-                className="text-slate-500 hover:text-white transition-colors text-xl leading-none"
-              >
-                ✕
-              </button>
+                className="text-slate-500 hover:text-white transition-colors text-lg leading-none"
+              >✕</button>
             </div>
 
             <textarea
-              className="flex-1 rounded-xl p-4 text-sm text-slate-200 placeholder-slate-600 resize-none border border-white/10 focus:border-indigo-500 focus:outline-none transition-colors"
+              className="flex-1 min-h-[120px] rounded-xl p-4 text-sm text-slate-200 placeholder-slate-600 resize-none border border-white/10 focus:border-indigo-500 focus:outline-none transition-colors"
               style={{ background: '#242424' }}
               placeholder={FACE_META[selectedFaceInfo.face].placeholder}
               value={editText}
@@ -527,11 +714,11 @@ export default function Board() {
             />
 
             <button
-              onClick={handleSave}
+              onClick={handleSaveFace}
               disabled={isSaving}
-              className={`mt-4 w-full transition-colors rounded-xl py-2.5 text-sm font-semibold disabled:opacity-50 ${
-                saveStatus === 'saved'  ? 'bg-green-600' :
-                saveStatus === 'error'  ? 'bg-red-600'   :
+              className={`w-full transition-colors rounded-xl py-2.5 text-sm font-semibold disabled:opacity-50 ${
+                saveStatus === 'saved' ? 'bg-green-600' :
+                saveStatus === 'error' ? 'bg-red-600'   :
                 'bg-indigo-600 hover:bg-indigo-500'
               }`}
             >
