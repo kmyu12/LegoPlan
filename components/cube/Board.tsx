@@ -8,6 +8,7 @@ import { supabase } from '@/lib/supabase'
 import { useStrategyStore, MODE_CONFIG } from '@/lib/store'
 import EfficiencyHUD from '@/components/hud/EfficiencyHUD'
 import StrategySlider from '@/components/hud/StrategySlider'
+import OracleSystem, { type OracleResult } from '@/components/hud/OracleSystem'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -513,6 +514,51 @@ export default function Board() {
   const critTotalRisk = criticalPath.reduce((s, id) => s + (cubes.find(c => c.id === id)?.risk ?? 0), 0)
   const critAvgRisk   = criticalPath.length > 0 ? (critTotalRisk / criticalPath.length) * 100 : 0
 
+  // ── Oracle Sync 핸들러 ────────────────────────────────────────────────────
+
+  const BAD_TEMPLATES = [
+    (n: string) => `🚨 오라클 경고: 빅테크의 AI 학습 데이터 규제안 발표! [${n}]의 Risk가 급증했습니다.`,
+    (n: string) => `🚨 오라클 경고: 글로벌 금리 인상 우려로 투자 심리 냉각! [${n}]에 위험 신호 감지.`,
+    (n: string) => `🚨 오라클 경고: 경쟁사 유사 제품 출시 임박! [${n}]의 시장 포지션이 위협받고 있습니다.`,
+    (n: string) => `🚨 오라클 경고: 핵심 규제 기관의 감사 착수 예정! [${n}] 실행 전 법적 검토 필요.`,
+  ]
+  const GOOD_TEMPLATES = [
+    (n: string) => `📈 오라클 분석: 중기부 딥테크 지원금 예산 확대! [${n}]의 가치가 상승했습니다.`,
+    (n: string) => `📈 오라클 분석: 해당 분야 VC 투자 급증! [${n}]의 성장 가능성이 재평가됐습니다.`,
+    (n: string) => `📈 오라클 분석: 정부 R&D 인센티브 확대 발표! [${n}]에 유리한 시장 환경이 조성됐습니다.`,
+    (n: string) => `📈 오라클 분석: 글로벌 파트너십 체결 기회 포착! [${n}]의 레버리지 효과 증대 예상.`,
+  ]
+
+  const handleOracleSync = useCallback(async (): Promise<OracleResult> => {
+    // 활성 큐브 중 랜덤 1~2개 선정
+    const activeCubes = cubes.filter(c => activeSet.has(c.id))
+    if (activeCubes.length === 0) {
+      return { type: 'good', message: '📡 오라클: 분석 가능한 활성 큐브가 없습니다. 큐브를 추가하세요.' }
+    }
+
+    const shuffled = [...activeCubes].sort(() => Math.random() - 0.5)
+    const targets  = shuffled.slice(0, Math.min(2, 1 + Math.floor(Math.random() * 2)))
+    const isBad    = Math.random() > 0.45 // 55% 악재, 45% 호재
+
+    // Supabase + 로컬 상태 동시 업데이트
+    for (const cube of targets) {
+      const newRisk = isBad
+        ? Math.min(1.0,  cube.risk + 0.15 + Math.random() * 0.35)
+        : Math.max(0.05, cube.risk - 0.12 - Math.random() * 0.25)
+
+      await supabase.from('cubes').update({ risk: newRisk }).eq('id', cube.id)
+      setCubes(prev => prev.map(c => c.id === cube.id ? { ...c, risk: newRisk } : c))
+    }
+
+    // 대표 큐브 이름 (IDENTITY 면 내용 or 순번)
+    const primary   = targets[0]
+    const cubeName  = primary.identity?.trim() || `Cube ${cubes.findIndex(c => c.id === primary.id) + 1}`
+    const templates = isBad ? BAD_TEMPLATES : GOOD_TEMPLATES
+    const message   = templates[Math.floor(Math.random() * templates.length)](cubeName)
+
+    return { type: isBad ? 'bad' : 'good', message }
+  }, [cubes, activeSet, setCubes])
+
   // ── 렌더 ──────────────────────────────────────────────────────────────────
 
   if (isLoading) {
@@ -574,6 +620,9 @@ export default function Board() {
 
       {/* ── Strategy Spectrum Slider ── */}
       <StrategySlider />
+
+      {/* ── Oracle Sync System ── */}
+      <OracleSystem onSync={handleOracleSync} />
 
       {/* ── Add Cube ── */}
       <button
