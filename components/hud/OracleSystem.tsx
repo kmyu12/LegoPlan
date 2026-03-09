@@ -10,7 +10,8 @@ export interface OracleResult {
 }
 
 interface OracleSystemProps {
-  onSync: () => Promise<OracleResult>
+  onSync:    () => Promise<OracleResult>
+  embedded?: boolean  // true면 자체 position:absolute 제거 (부모 컨테이너에서 위치 제어)
 }
 
 // ─── CSS Keyframes ────────────────────────────────────────────────────────────
@@ -237,7 +238,7 @@ function OracleButton({ isScanning, dots, onClick }: {
 
 // ─── Oracle System (메인) ─────────────────────────────────────────────────────
 
-export default function OracleSystem({ onSync }: OracleSystemProps) {
+export default function OracleSystem({ onSync, embedded = false }: OracleSystemProps) {
   const [isScanning, setIsScanning] = useState(false)
   const [dots, setDots]             = useState('')
   const [toast, setToast]           = useState<OracleResult | null>(null)
@@ -273,8 +274,8 @@ export default function OracleSystem({ onSync }: OracleSystemProps) {
       {/* 스캔 오버레이 */}
       {isScanning && <ScanOverlay />}
 
-      {/* 버튼 — 우측 상단 */}
-      <div style={{ position: 'absolute', top: 20, right: 20, zIndex: 10 }}>
+      {/* 버튼 */}
+      <div style={embedded ? {} : { position: 'absolute', top: 20, right: 20, zIndex: 10 }}>
         <OracleButton isScanning={isScanning} dots={dots} onClick={handleClick} />
       </div>
 

@@ -9,6 +9,7 @@ import { useStrategyStore, MODE_CONFIG } from '@/lib/store'
 import EfficiencyHUD from '@/components/hud/EfficiencyHUD'
 import StrategySlider from '@/components/hud/StrategySlider'
 import OracleSystem, { type OracleResult } from '@/components/hud/OracleSystem'
+import AutoRouteButton, { type RoutePhase } from '@/components/hud/AutoRouteButton'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -374,6 +375,11 @@ export default function Board() {
   const [isSaving, setIsSaving]     = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
 
+  // ── Auto-Route 상태 ───────────────────────────────────────────────────────
+  const [routePhase, setRoutePhase]         = useState<RoutePhase>('idle')
+  const [routeError, setRouteError]         = useState('')
+  const [explorationLines, setExplorationLines] = useState<{ fromId: string; toId: string }[]>([])
+
   // ── Graph 계산 (메모이제이션) ────────────────────────────────────────────────
   const activeSet       = useMemo(() => computeActiveStates(cubes, connections),        [cubes, connections])
   const criticalPath    = useMemo(() => computeCriticalPath(cubes, connections),         [cubes, connections])
@@ -559,6 +565,111 @@ export default function Board() {
     return { type: isBad ? 'bad' : 'good', message }
   }, [cubes, activeSet, setCubes])
 
+  // ── Auto-Route 알고리즘 ────────────────────────────────────────────────────
+
+  const handleAutoRoute = useCallback(async () => {
+    // 사전 검증
+    const rootCubes = cubes.filter(c => c.is_root)
+    const goalCubes = cubes.filter(c => c.is_goal)
+
+    if (rootCubes.length === 0 || goalCubes.length === 0) {
+      setRouteError('Root / Goal 큐브를 먼저 지정하세요')
+      setRoutePhase('error')
+      setTimeout(() => setRoutePhase('idle'), 2500)
+      return
+    }
+    if (cubes.length < 2) {
+      setRouteError('큐브가 2개 이상 필요합니다')
+      setRoutePhase('error')
+      setTimeout(() => setRoutePhase('idle'), 2500)
+      return
+    }
+
+    setRoutePhase('exploring')
+
+    // ── 1단계: 탐색 애니메이션용 후보 선 생성 ────────────────────────
+    const allPairs: { fromId: string; toId: string }[] = []
+    for (let i = 0; i < cubes.length; i++) {
+      for (let j = i + 1; j < cubes.length; j++) {
+        allPairs.push({ fromId: cubes[i].id, toId: cubes[j].id })
+      }
+    }
+    const shuffled = [...allPairs].sort(() => Math.random() - 0.5)
+    const maxShow  = Math.min(shuffled.length, cubes.length * 3)
+
+    // 플리커 연출 (300ms 전체 → 100ms 절반 → 100ms 전체 → 해제)
+    setExplorationLines(shuffled.slice(0, maxShow))
+    await new Promise(r => setTimeout(r, 300))
+    setExplorationLines(shuffled.slice(0, Math.ceil(maxShow / 2)))
+    await new Promise(r => setTimeout(r, 100))
+    setExplorationLines(shuffled.slice(0, maxShow))
+    await new Promise(r => setTimeout(r, 100))
+    setExplorationLines([])
+
+    setRoutePhase('routing')
+
+    // ── 2단계: 라우팅 경로 결정 ────────────────────────────────────────
+    const root = rootCubes[0]
+    const goal = goalCubes[0]
+
+    // modeIndex 0~1: 보수적 (최대 경유) / 2~3: 공격적 (최단 경로)
+    const isAggressive = modeIndex >= 2
+
+    const intermediates = cubes.filter(c =>
+      c.id !== root.id && c.id !== goal.id && activeSet.has(c.id)
+    )
+
+    let path: string[]
+
+    if (isAggressive) {
+      // 공격적: ROOT → (risk < 0.25 중 최대 1개) → GOAL
+      const safe = intermediates
+        .filter(c => c.risk < 0.25)
+        .sort((a, b) => a.risk - b.risk)
+        .slice(0, 1)
+      path = [root.id, ...safe.map(c => c.id), goal.id]
+    } else {
+      // 보수적: ROOT → (risk 낮은 순으로 전체 중간 큐브) → GOAL
+      const sorted = [...intermediates].sort((a, b) => a.risk - b.risk)
+      path = [root.id, ...sorted.map(c => c.id), goal.id]
+    }
+
+    // ── 3단계: 기존 연결 초기화 후 새 연결 생성 ─────────────────────
+    const PORT_PAIRS_CONSERVATIVE: [FaceLabel, FaceLabel][] = [
+      ['OUTPUT', 'INPUT'],
+      ['LOGIC',  'BARRIER'],
+      ['IDENTITY','LOGIC'],
+      ['LOGIC',  'INPUT'],
+    ]
+    const PORT_PAIRS_AGGRESSIVE: [FaceLabel, FaceLabel][] = [
+      ['OUTPUT', 'INPUT'],
+      ['OUTPUT', 'BARRIER'],
+    ]
+    const pairPool = isAggressive ? PORT_PAIRS_AGGRESSIVE : PORT_PAIRS_CONSERVATIVE
+
+    // 기존 연결 삭제
+    await supabase.from('connections').delete().eq('board_id', BOARD_ID)
+    setConnections([])
+
+    // 새 연결 생성
+    const newConns: ConnRow[] = []
+    for (let i = 0; i < path.length - 1; i++) {
+      const [fromFace, toFace] = pairPool[i % pairPool.length]
+      const { data } = await supabase.from('connections').insert({
+        board_id:     BOARD_ID,
+        from_cube_id: path[i],
+        from_face:    fromFace,
+        to_cube_id:   path[i + 1],
+        to_face:      toFace,
+      }).select().single()
+      if (data) newConns.push(data as ConnRow)
+    }
+    setConnections(newConns)
+
+    setRoutePhase('done')
+    setTimeout(() => setRoutePhase('idle'), 2500)
+  }, [cubes, activeSet, modeIndex])
+
   // ── 렌더 ──────────────────────────────────────────────────────────────────
 
   if (isLoading) {
@@ -611,6 +722,28 @@ export default function Board() {
           )
         })}
 
+        {/* ── 탐색 애니메이션 후보 선 ── */}
+        {explorationLines.map((line, i) => {
+          const fc = cubes.find(c => c.id === line.fromId)
+          const tc = cubes.find(c => c.id === line.toId)
+          if (!fc || !tc) return null
+          return (
+            <Line
+              key={`explore-${i}`}
+              points={[
+                new THREE.Vector3(fc.position_x, fc.position_y, fc.position_z),
+                new THREE.Vector3(tc.position_x, tc.position_y, tc.position_z),
+              ]}
+              color="#06b6d4"
+              lineWidth={0.6}
+              dashed
+              dashScale={6}
+              dashSize={0.25}
+              gapSize={0.35}
+            />
+          )
+        })}
+
         <DragLine connecting={connecting} />
         <OrbitControls enablePan minDistance={3} maxDistance={40} enableRotate={!connecting} enableZoom />
       </Canvas>
@@ -621,8 +754,15 @@ export default function Board() {
       {/* ── Strategy Spectrum Slider ── */}
       <StrategySlider />
 
-      {/* ── Oracle Sync System ── */}
-      <OracleSystem onSync={handleOracleSync} />
+      {/* ── Oracle Sync System + Auto-Route (우측 상단 스택) ── */}
+      <div style={{ position: 'absolute', top: 20, right: 20, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+        <OracleSystem onSync={handleOracleSync} embedded />
+        <AutoRouteButton
+          phase={routePhase}
+          errorMsg={routeError}
+          onClick={handleAutoRoute}
+        />
+      </div>
 
       {/* ── Add Cube ── */}
       <button
