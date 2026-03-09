@@ -5,6 +5,9 @@ import { Canvas, useFrame, ThreeEvent, useThree } from '@react-three/fiber'
 import { OrbitControls, Line, Text } from '@react-three/drei'
 import * as THREE from 'three'
 import { supabase } from '@/lib/supabase'
+import { useStrategyStore, MODE_CONFIG } from '@/lib/store'
+import EfficiencyHUD from '@/components/hud/EfficiencyHUD'
+import StrategySlider from '@/components/hud/StrategySlider'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -376,6 +379,35 @@ export default function Board() {
   const criticalConnIds = useMemo(() => getCriticalConnIds(criticalPath, connections),   [criticalPath, connections])
   const critPathSet     = useMemo(() => new Set(criticalPath),                           [criticalPath])
 
+  // ── Strategy & Efficiency (Zustand) ──────────────────────────────────────────
+  const { modeIndex } = useStrategyStore()
+
+  const efficiencyData = useMemo(() => {
+    const modeWeight = MODE_CONFIG[modeIndex].weight
+
+    // Total Gain: 활성 큐브 간 OUTPUT/INPUT 포트 연결 수 × 10
+    const totalGain = connections.filter(c => {
+      const bothActive  = activeSet.has(c.from_cube_id) && activeSet.has(c.to_cube_id)
+      const isGainPort  = c.from_face === 'OUTPUT' || c.from_face === 'INPUT'
+                       || c.to_face   === 'OUTPUT' || c.to_face   === 'INPUT'
+      return bothActive && isGainPort
+    }).length * 10
+
+    // Total Step Count: 활성 큐브 개수
+    const stepCount = activeSet.size
+
+    // Critical Path Risk Sum
+    const critRisk = criticalPath.reduce(
+      (s, id) => s + (cubes.find(c => c.id === id)?.risk ?? 0), 0
+    )
+
+    // Efficiency Score = (Total Gain × Mode Weight) / (Step Count + Crit Risk)
+    const denominator = stepCount + critRisk
+    const score = denominator > 0 ? (totalGain * modeWeight) / denominator : 0
+
+    return { score, totalGain, stepCount, critRisk, modeWeight }
+  }, [connections, activeSet, criticalPath, cubes, modeIndex])
+
   const selectedCube = selectedFaceInfo ? cubes.find(c => c.id === selectedFaceInfo.cubeId) : null
 
   // ── 초기 로드 + 실시간 ─────────────────────────────────────────────────────
@@ -537,16 +569,11 @@ export default function Board() {
         <OrbitControls enablePan minDistance={3} maxDistance={40} enableRotate={!connecting} enableZoom />
       </Canvas>
 
-      {/* ── 범례 ── */}
-      <div
-        className="absolute top-5 left-5 rounded-xl px-3 py-2.5 text-xs border border-white/10 backdrop-blur space-y-1.5"
-        style={{ background: 'rgba(0,0,0,0.5)' }}
-      >
-        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-green-500 inline-block" /> ROOT (항상 활성)</div>
-        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-amber-500 inline-block" /> GOAL (목표 큐브)</div>
-        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-red-500 inline-block"   /> Critical Path</div>
-        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-slate-700 inline-block" /> 비활성 (선행조건 미충족)</div>
-      </div>
+      {/* ── Efficiency HUD (범례 통합) ── */}
+      <EfficiencyHUD data={efficiencyData} />
+
+      {/* ── Strategy Spectrum Slider ── */}
+      <StrategySlider />
 
       {/* ── Add Cube ── */}
       <button
@@ -581,7 +608,7 @@ export default function Board() {
       {/* ── Critical Path 패널 ── */}
       {criticalPath.length > 0 && (
         <div
-          className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-xl px-5 py-3 border border-red-500/30 backdrop-blur text-xs max-w-lg"
+          className="absolute bottom-6 left-24 rounded-xl px-5 py-3 border border-red-500/30 backdrop-blur text-xs max-w-lg"
           style={{ background: 'rgba(239,68,68,0.07)' }}
         >
           <div className="flex items-center gap-2 text-red-400 font-semibold mb-2">
