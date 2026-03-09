@@ -97,7 +97,9 @@ export default function InboxPanel({ onSpawn }: InboxPanelProps) {
   const [message,  setMessage]  = useState('')
   const [preview,  setPreview]  = useState<{ cubes: number; hasPreMortem: boolean } | null>(null)
 
-  const { setPreMortemData, preMortemData } = useDoomsdayStore()
+  // ⚠️ 파싱/소환 단계에서는 setPreMortemData 만 사용.
+  // isDoomsdayActive / activateDoomsday 는 절대 호출하지 않음 — Kill Switch 전용
+  const { setPreMortemData, preMortemData, resetDoomsday } = useDoomsdayStore()
 
   // ── 미리보기 (실시간 파싱) ────────────────────────────────────────────────
   const handleTextChange = useCallback((v: string) => {
@@ -331,7 +333,7 @@ export default function InboxPanel({ onSpawn }: InboxPanelProps) {
           {/* 초기화 버튼 */}
           {preMortemData && (
             <button
-              onClick={() => useDoomsdayStore.getState().resetDoomsday()}
+              onClick={() => { resetDoomsday() }}
               style={{
                 marginTop: 6, width: '100%',
                 padding: '6px 0', borderRadius: 8,

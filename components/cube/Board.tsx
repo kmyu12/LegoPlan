@@ -512,7 +512,12 @@ function DoomKillSwitch({ name, onActivate }: { name: string; onActivate: () => 
                 }}
               >취소</button>
               <button
-                onClick={onActivate}
+                onClick={(e) => {
+                  e.stopPropagation()    // 이벤트 버블링 차단
+                  e.preventDefault()
+                  setArmed(false)        // armed 먼저 false로 — 연속 클릭 방지
+                  onActivate()           // 명시적 단순 호출
+                }}
                 style={{
                   fontFamily: 'monospace', fontSize: 10, fontWeight: 700, padding: '6px 14px', borderRadius: 8,
                   background: 'rgba(220,38,38,0.25)', border: '1px solid rgba(220,38,38,0.7)',
@@ -673,7 +678,7 @@ export default function Board() {
 
   // ── Strategy & Efficiency (Zustand) ──────────────────────────────────────────
   const { modeIndex } = useStrategyStore()
-  const { preMortemData, isDoomsdayActive, setIsDoomsdayActive } = useDoomsdayStore()
+  const { preMortemData, isDoomsdayActive, activateDoomsday, deactivateDoomsday } = useDoomsdayStore()
   const { setSelectedCubeId } = useAIStore()
 
   const efficiencyData = useMemo(() => {
@@ -1188,14 +1193,15 @@ export default function Board() {
       {/* ── ☠️ Kill Switch (우측 하단) ── */}
       {preMortemData && !isDoomsdayActive && (
         <DoomKillSwitch
+          key={preMortemData.name}          // preMortemData 교체 시 강제 재마운트 → armed=false 초기화
           name={preMortemData.name}
-          onActivate={() => setIsDoomsdayActive(true)}
+          onActivate={() => { activateDoomsday() }}   // 명시적 화살표 래핑
         />
       )}
 
       {/* ── FATAL ERROR 오버레이 ── */}
       {isDoomsdayActive && preMortemData && (
-        <FatalErrorOverlay data={preMortemData} onDismiss={() => setIsDoomsdayActive(false)} />
+        <FatalErrorOverlay data={preMortemData} onDismiss={() => { deactivateDoomsday() }} />
       )}
 
       {/* ── Add Cube ── */}

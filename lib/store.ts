@@ -49,17 +49,23 @@ export interface ParsedCubeSpec {
 interface DoomsdayStore {
   preMortemData:      PreMortemData | null
   isDoomsdayActive:   boolean
+  /** pre_mortem 데이터 저장만 — isDoomsdayActive를 건드리지 않음 */
   setPreMortemData:   (data: PreMortemData | null) => void
-  setIsDoomsdayActive:(v: boolean) => void
+  /** 사용자가 Kill Switch를 명시적으로 눌렀을 때만 호출 */
+  activateDoomsday:   () => void
+  /** Fatal Error 오버레이 닫기 — active만 false로 */
+  deactivateDoomsday: () => void
+  /** 데이터 + active 모두 초기화 */
   resetDoomsday:      () => void
 }
 
 export const useDoomsdayStore = create<DoomsdayStore>((set) => ({
-  preMortemData:      null,
-  isDoomsdayActive:   false,
-  setPreMortemData:   (data)  => set({ preMortemData: data }),
-  setIsDoomsdayActive:(v)     => set({ isDoomsdayActive: v }),
-  resetDoomsday:      ()      => set({ isDoomsdayActive: false, preMortemData: null }),
+  preMortemData:    null,
+  isDoomsdayActive: false,
+  setPreMortemData:   (data) => set({ preMortemData: data }),       // ← active 절대 변경 안 함
+  activateDoomsday:   ()     => set({ isDoomsdayActive: true }),    // ← 사용자 명시 클릭 전용
+  deactivateDoomsday: ()     => set({ isDoomsdayActive: false }),   // ← 닫기 전용
+  resetDoomsday:      ()     => set({ isDoomsdayActive: false, preMortemData: null }),
 }))
 
 // ─── AI Editology Store ──────────────────────────────────────────────────────
