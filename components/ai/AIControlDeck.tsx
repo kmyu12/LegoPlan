@@ -13,7 +13,7 @@ export interface CubeContextData {
   red:      string
   blue:     string
   risk:     number
-  position_x: number
+  position_x: number   // Board.tsx → c.x 로 매핑됨
   position_y: number
   position_z: number
 }

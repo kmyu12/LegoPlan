@@ -20,9 +20,9 @@ type FaceLabel = 'OUTPUT' | 'INPUT' | 'BARRIER' | 'LOGIC' | 'IDENTITY' | 'HISTOR
 interface CubeRow {
   id: string
   board_id: string
-  position_x: number
-  position_y: number
-  position_z: number
+  x: number   // DB 컬럼명: x (handleAddCube 기준)
+  y: number
+  z: number
   output: string
   input: string
   barrier: string
@@ -87,9 +87,9 @@ const FACE_META: Record<FaceLabel, { title: string; placeholder: string; emoji: 
 function getPortWorldPos(cube: CubeRow, face: FaceLabel): THREE.Vector3 {
   const n = FACE_NORMALS[face]
   return new THREE.Vector3(
-    cube.position_x + n.x * PORT_OFFSET,
-    cube.position_y + n.y * PORT_OFFSET,
-    cube.position_z + n.z * PORT_OFFSET,
+    cube.x + n.x * PORT_OFFSET,
+    cube.y + n.y * PORT_OFFSET,
+    cube.z + n.z * PORT_OFFSET,
   )
 }
 
@@ -274,7 +274,7 @@ function CubeInstance({ cube, connecting, isActive, isOnCritPath, onFaceClick, o
   onPortClick: (cubeId: string, face: FaceLabel) => void
 }) {
   return (
-    <group position={[cube.position_x, cube.position_y, cube.position_z]}>
+    <group position={[cube.x, cube.y, cube.z]}>
       {/* 큐브 본체 */}
       <mesh>
         <boxGeometry args={[2, 2, 2]} />
@@ -989,24 +989,26 @@ export default function Board() {
   const handleSpawnCubes = useCallback(async (specs: ParsedCubeSpec[]) => {
     const startIdx = cubes.length
     for (let i = 0; i < specs.length; i++) {
-      const spec = specs[i]
-      const pos  = getSpawnPos(startIdx + i)
-      const { data } = await supabase.from('cubes').insert({
-        board_id:   BOARD_ID,
-        position_x: pos.x + (Math.random() - 0.5) * 2,
-        position_y: 0,
-        position_z: pos.z + (Math.random() - 0.5) * 2,
-        identity:   spec.name    ?? '',
-        output:     spec.green   ?? '',
-        input:      spec.yellow  ?? '',
-        barrier:    spec.red     ?? '',
-        logic:      spec.blue    ?? '',
-        history:    spec.black   ?? '',
-        is_root:    false,
-        is_goal:    false,
-        risk:       0.3,
+      const spec  = specs[i]
+      const base  = getSpawnPos(startIdx + i)
+      // handleAddCube와 동일한 컬럼명(x, y, z) 사용 — position_x/y/z 는 DB에 없음
+      const { data, error } = await supabase.from('cubes').insert({
+        board_id: BOARD_ID,
+        x: base.x + (Math.random() - 0.5) * 2,
+        y: 0,
+        z: base.z + (Math.random() - 0.5) * 2,
+        identity: spec.name    ?? '',
+        output:   spec.green   ?? '',
+        input:    spec.yellow  ?? '',
+        barrier:  spec.red     ?? '',
+        logic:    spec.blue    ?? '',
+        history:  spec.black   ?? '',
+        is_root:  false,
+        is_goal:  false,
+        risk:     0.3,
       }).select().single()
-      if (data) setCubes(p => [...p, data as CubeRow])
+      if (error) console.error('[Spawn] Supabase 오류:', error.message)
+      if (data)  setCubes(p => [...p, data as CubeRow])
     }
   }, [cubes.length])
 
@@ -1024,9 +1026,9 @@ export default function Board() {
         red:        c.barrier  ?? '',
         blue:       c.logic    ?? '',
         risk:       c.risk,
-        position_x: c.position_x,
-        position_y: c.position_y,
-        position_z: c.position_z,
+        position_x: c.x,
+        position_y: c.y,
+        position_z: c.z,
       })),
   [criticalPath, cubes])
 
@@ -1041,9 +1043,9 @@ export default function Board() {
       red:        cube.barrier  ?? '',
       blue:       cube.logic    ?? '',
       risk:       cube.risk,
-      position_x: cube.position_x,
-      position_y: cube.position_y,
-      position_z: cube.position_z,
+      position_x: cube.x,
+      position_y: cube.y,
+      position_z: cube.z,
     }
   }, [selectedFaceInfo, cubes])
 
@@ -1053,22 +1055,24 @@ export default function Board() {
     pos: { x: number; y: number; z: number },
     mode: 'A' | 'B'
   ) => {
-    const { data } = await supabase.from('cubes').insert({
-      board_id:   BOARD_ID,
-      position_x: pos.x,
-      position_y: pos.y,
-      position_z: pos.z,
-      identity:   spec.name    ?? '',
-      output:     spec.green   ?? '',
-      input:      spec.yellow  ?? '',
-      barrier:    spec.red     ?? '',
-      logic:      spec.blue    ?? '',
-      history:    '',
-      is_root:    false,
-      is_goal:    false,
-      risk:       mode === 'A' ? 0.75 : 0.25,  // Red Team은 높은 risk, Lateral은 낮은 risk
+    // handleAddCube와 동일한 컬럼명(x, y, z) 사용
+    const { data, error } = await supabase.from('cubes').insert({
+      board_id: BOARD_ID,
+      x:        pos.x,
+      y:        pos.y,
+      z:        pos.z,
+      identity: spec.name    ?? '',
+      output:   spec.green   ?? '',
+      input:    spec.yellow  ?? '',
+      barrier:  spec.red     ?? '',
+      logic:    spec.blue    ?? '',
+      history:  '',
+      is_root:  false,
+      is_goal:  false,
+      risk:     mode === 'A' ? 0.75 : 0.25,
     }).select().single()
-    if (data) setCubes(p => [...p, data as CubeRow])
+    if (error) console.error('[AI Spawn] Supabase 오류:', error.message)
+    if (data)  setCubes(p => [...p, data as CubeRow])
   }, [])
 
   // ── 렌더 ──────────────────────────────────────────────────────────────────
@@ -1149,8 +1153,8 @@ export default function Board() {
             <Line
               key={`explore-${i}`}
               points={[
-                new THREE.Vector3(fc.position_x, fc.position_y, fc.position_z),
-                new THREE.Vector3(tc.position_x, tc.position_y, tc.position_z),
+                new THREE.Vector3(fc.x, fc.y, fc.z),
+                new THREE.Vector3(tc.x, tc.y, tc.z),
               ]}
               color="#06b6d4"
               lineWidth={0.6}
