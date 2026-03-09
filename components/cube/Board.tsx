@@ -5,11 +5,12 @@ import { Canvas, useFrame, ThreeEvent, useThree } from '@react-three/fiber'
 import { OrbitControls, Line, Text } from '@react-three/drei'
 import * as THREE from 'three'
 import { supabase } from '@/lib/supabase'
-import { useStrategyStore, MODE_CONFIG } from '@/lib/store'
+import { useStrategyStore, MODE_CONFIG, useDoomsdayStore, type ParsedCubeSpec } from '@/lib/store'
 import EfficiencyHUD from '@/components/hud/EfficiencyHUD'
 import StrategySlider from '@/components/hud/StrategySlider'
 import OracleSystem, { type OracleResult } from '@/components/hud/OracleSystem'
 import AutoRouteButton, { type RoutePhase } from '@/components/hud/AutoRouteButton'
+import InboxPanel from '@/components/inbox/InboxPanel'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -362,6 +363,289 @@ function DragLine({ connecting }: { connecting: ConnectingState | null }) {
   )
 }
 
+// ─── GlitchLine (끊긴 연결선 글리치 이펙트) ──────────────────────────────────
+
+function GlitchLine({ from, to }: { from: THREE.Vector3; to: THREE.Vector3 }) {
+  const groupRef = useRef<THREE.Group>(null)
+  useFrame(({ clock }) => {
+    if (!groupRef.current) return
+    const t = clock.elapsedTime
+    groupRef.current.visible = Math.sin(t * 28) > -0.45
+  })
+  return (
+    <group ref={groupRef}>
+      <Line points={[from, to]} color="#ff2222" lineWidth={4} dashed dashScale={2} dashSize={0.2} gapSize={0.15} />
+    </group>
+  )
+}
+
+// ─── EmergencyLight (둠스데이 적색 비상등) ────────────────────────────────────
+
+function EmergencyLight({ active }: { active: boolean }) {
+  const lightRef = useRef<THREE.PointLight>(null)
+  useFrame(({ clock }) => {
+    if (!lightRef.current) return
+    lightRef.current.intensity = active
+      ? Math.max(0, 2.5 + Math.sin(clock.elapsedTime * 9) * 2.0)
+      : 0
+  })
+  return <pointLight ref={lightRef} color="#ff1a1a" position={[0, 8, 0]} intensity={0} distance={40} />
+}
+
+// ─── DoomCubeEntity (떨어지는 치명적 가설 큐브) ───────────────────────────────
+
+interface DoomCubeEntityProps {
+  name: string
+}
+function DoomCubeEntity({ name }: DoomCubeEntityProps) {
+  const groupRef  = useRef<THREE.Group>(null)
+  const landed    = useRef(false)
+  const shakeTime = useRef(0)
+  const START_Y   = 18
+
+  useFrame(({ clock }, delta) => {
+    if (!groupRef.current) return
+    const g = groupRef.current
+
+    if (!landed.current) {
+      // 떨어짐
+      g.position.y = THREE.MathUtils.lerp(g.position.y, 0.05, delta * 2.2)
+      if (Math.abs(g.position.y - 0.05) < 0.15) {
+        landed.current = true
+        shakeTime.current = clock.elapsedTime
+      }
+    } else {
+      // 착지 쿵! 진동 감쇠
+      const elapsed = clock.elapsedTime - shakeTime.current
+      const decay   = Math.max(0, 1 - elapsed * 3)
+      g.position.x = Math.sin(clock.elapsedTime * 40) * 0.06 * decay
+      g.position.z = Math.cos(clock.elapsedTime * 35) * 0.04 * decay
+      g.position.y = 0.05 + Math.abs(Math.sin(clock.elapsedTime * 30)) * 0.03 * decay
+    }
+  })
+
+  return (
+    <group ref={groupRef} position={[0, START_Y, 0]}>
+      {/* 메인 큐브 — 검붉은 질감 */}
+      <mesh>
+        <boxGeometry args={[3.2, 3.2, 3.2]} />
+        <meshStandardMaterial color="#1a0000" roughness={0.95} metalness={0.05} emissive="#330000" emissiveIntensity={0.4} />
+      </mesh>
+      {/* 테두리 프레임 — 붉은 엣지 */}
+      <mesh>
+        <boxGeometry args={[3.22, 3.22, 3.22]} />
+        <meshStandardMaterial color="#ff0000" wireframe opacity={0.25} transparent />
+      </mesh>
+      {/* 상단 면 텍스트 — 치명적 가설 이름 */}
+      <Text
+        position={[0, 1.65, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        fontSize={0.22}
+        color="#ff4444"
+        anchorX="center"
+        anchorY="middle"
+        maxWidth={2.8}
+      >
+        {name}
+      </Text>
+      {/* 아래 포인트 라이트 — 붉은 빛 */}
+      <pointLight color="#ff0000" intensity={3} distance={10} />
+    </group>
+  )
+}
+
+// ─── Doom Kill Switch CSS ────────────────────────────────────────────────────
+
+const DOOM_CSS = `
+@keyframes doom-btn-throb {
+  0%, 100% { box-shadow: 0 0 12px rgba(220,38,38,0.4), 0 0 0 0 rgba(220,38,38,0.3); }
+  50%       { box-shadow: 0 0 32px rgba(220,38,38,0.8), 0 0 0 8px rgba(220,38,38,0); }
+}
+@keyframes doom-btn-shake {
+  0%,100% { transform: translateX(0); }
+  20%     { transform: translateX(-3px) rotate(-1deg); }
+  40%     { transform: translateX(3px)  rotate(1deg); }
+  60%     { transform: translateX(-2px); }
+  80%     { transform: translateX(2px); }
+}
+@keyframes doom-fatal-in {
+  0%   { transform: translate(-50%, -50%) scale(0.85); opacity: 0; }
+  60%  { transform: translate(-50%, -50%) scale(1.03); }
+  100% { transform: translate(-50%, -50%) scale(1);    opacity: 1; }
+}
+@keyframes doom-border-pulse {
+  0%, 100% { border-color: rgba(220,38,38,0.5); box-shadow: 0 0 20px rgba(220,38,38,0.2); }
+  50%       { border-color: rgba(220,38,38,0.9); box-shadow: 0 0 60px rgba(220,38,38,0.4); }
+}
+@keyframes doom-text-flicker {
+  0%, 100% { opacity: 1; text-shadow: 0 0 20px #ff2222; }
+  25%       { opacity: 0.85; }
+  50%       { opacity: 1; }
+  75%       { opacity: 0.9; text-shadow: 0 0 40px #ff4444; }
+}
+@keyframes doom-scanline {
+  from { top: -2px; }
+  to   { top: 100%; }
+}
+`
+
+function DoomKillSwitch({ name, onActivate }: { name: string; onActivate: () => void }) {
+  const [armed, setArmed] = useState(false)
+  return (
+    <>
+      <style>{DOOM_CSS}</style>
+      <div style={{ position: 'absolute', bottom: 170, right: 20, zIndex: 30, textAlign: 'right' }}>
+        {armed ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
+            <div style={{ fontFamily: 'monospace', fontSize: 8, color: '#fca5a5', letterSpacing: '0.1em' }}>
+              ⚠️ 정말 실행하시겠습니까?<br />
+              <span style={{ color: '#6b7280' }}>&ldquo;{name}&rdquo;</span>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={() => setArmed(false)}
+                style={{
+                  fontFamily: 'monospace', fontSize: 10, padding: '6px 12px', borderRadius: 8,
+                  background: 'transparent', border: '1px solid rgba(107,114,128,0.4)',
+                  color: '#6b7280', cursor: 'pointer',
+                }}
+              >취소</button>
+              <button
+                onClick={onActivate}
+                style={{
+                  fontFamily: 'monospace', fontSize: 10, fontWeight: 700, padding: '6px 14px', borderRadius: 8,
+                  background: 'rgba(220,38,38,0.25)', border: '1px solid rgba(220,38,38,0.7)',
+                  color: '#fca5a5', cursor: 'pointer',
+                  animation: 'doom-btn-throb 0.6s ease-in-out infinite',
+                  letterSpacing: '0.08em',
+                }}
+              >⚡ 확인 — 실행</button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontFamily: 'monospace', fontSize: 7, color: '#6b7280', marginBottom: 4, textAlign: 'right', letterSpacing: '0.05em' }}>
+              사전 부검 시나리오 탑재됨
+            </div>
+            <button
+              onClick={() => setArmed(true)}
+              style={{
+                fontFamily: 'monospace', fontSize: 12, fontWeight: 900, padding: '11px 20px', borderRadius: 12,
+                background: 'rgba(10,0,0,0.92)',
+                border: '2px solid rgba(220,38,38,0.6)',
+                color: '#ef4444', cursor: 'pointer',
+                backdropFilter: 'blur(16px)',
+                letterSpacing: '0.08em',
+                animation: 'doom-btn-throb 2s ease-in-out infinite',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              ☠️ 사전 부검 (Kill Switch)
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+function FatalErrorOverlay({ data, onDismiss }: { data: { name: string; fatal_cause: string; risk_index: number }; onDismiss: () => void }) {
+  return (
+    <>
+      <style>{DOOM_CSS}</style>
+      {/* 배경 틴트 */}
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 90, pointerEvents: 'none',
+        background: 'rgba(40,0,0,0.45)',
+      }} />
+      {/* 스캔라인 */}
+      <div style={{
+        position: 'fixed', left: 0, right: 0, height: 2, zIndex: 91, pointerEvents: 'none',
+        background: 'rgba(255,0,0,0.4)',
+        animation: 'doom-scanline 2.5s linear infinite',
+      }} />
+      {/* 중앙 경고창 */}
+      <div style={{
+        position: 'fixed', top: '50%', left: '50%', zIndex: 100,
+        transform: 'translate(-50%, -50%)',
+        width: 520, maxWidth: '90vw',
+        background: 'rgba(4,0,0,0.97)',
+        border: '2px solid rgba(220,38,38,0.7)',
+        borderRadius: 16,
+        padding: '32px 36px',
+        backdropFilter: 'blur(24px)',
+        animation: 'doom-fatal-in 0.4s ease-out forwards, doom-border-pulse 2s ease-in-out infinite 0.4s',
+        textAlign: 'center',
+      }}>
+        {/* 상단 태그 */}
+        <div style={{ fontFamily: 'monospace', fontSize: 9, color: '#7f1d1d', letterSpacing: '0.3em', marginBottom: 12 }}>
+          ■ PRE-MORTEM SIMULATION ACTIVATED ■
+        </div>
+
+        {/* 메인 타이틀 */}
+        <div style={{
+          fontFamily: 'monospace', fontSize: 22, fontWeight: 900,
+          color: '#ef4444', letterSpacing: '0.06em', lineHeight: 1.3,
+          animation: 'doom-text-flicker 1.5s ease-in-out infinite',
+          marginBottom: 18,
+        }}>
+          ⚠️ FATAL ERROR
+        </div>
+
+        {/* Fatal Cause */}
+        <div style={{
+          fontFamily: 'monospace', fontSize: 14, color: '#fca5a5',
+          lineHeight: 1.7, marginBottom: 20, padding: '0 8px',
+        }}>
+          {data.fatal_cause}
+        </div>
+
+        {/* 리스크 인덱스 */}
+        <div style={{ display: 'flex', justifyContent: 'center', gap: 28, marginBottom: 24 }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontFamily: 'monospace', fontSize: 28, fontWeight: 900, color: '#ef4444' }}>
+              {data.risk_index}
+            </div>
+            <div style={{ fontFamily: 'monospace', fontSize: 8, color: '#6b7280', letterSpacing: '0.15em' }}>RISK INDEX</div>
+          </div>
+          <div style={{ width: 1, background: 'rgba(220,38,38,0.2)' }} />
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontFamily: 'monospace', fontSize: 28, fontWeight: 900, color: '#7f1d1d' }}>
+              −{Math.round(data.risk_index * 0.5)}%
+            </div>
+            <div style={{ fontFamily: 'monospace', fontSize: 8, color: '#6b7280', letterSpacing: '0.15em' }}>EFFICIENCY DROP</div>
+          </div>
+        </div>
+
+        {/* 시나리오 이름 */}
+        <div style={{
+          padding: '8px 16px', borderRadius: 8,
+          background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.2)',
+          fontFamily: 'monospace', fontSize: 11, color: '#9ca3af', marginBottom: 22,
+        }}>
+          시나리오: &ldquo;{data.name}&rdquo;
+        </div>
+
+        {/* 닫기 버튼 */}
+        <button
+          onClick={onDismiss}
+          style={{
+            fontFamily: 'monospace', fontSize: 11, fontWeight: 700, padding: '9px 28px', borderRadius: 10,
+            background: 'rgba(220,38,38,0.15)', border: '1px solid rgba(220,38,38,0.4)',
+            color: '#fca5a5', cursor: 'pointer', letterSpacing: '0.08em',
+          }}
+        >
+          [SYSTEM OVERRIDE — 시뮬레이션 종료]
+        </button>
+
+        <div style={{ fontFamily: 'monospace', fontSize: 7, color: '#374151', marginTop: 14, letterSpacing: '0.1em' }}>
+          종료 후에도 효율성 패널티({data.risk_index}pt)는 유지됩니다
+        </div>
+      </div>
+    </>
+  )
+}
+
 // ─── Board ────────────────────────────────────────────────────────────────────
 
 export default function Board() {
@@ -388,6 +672,7 @@ export default function Board() {
 
   // ── Strategy & Efficiency (Zustand) ──────────────────────────────────────────
   const { modeIndex } = useStrategyStore()
+  const { preMortemData, isDoomsdayActive, setIsDoomsdayActive } = useDoomsdayStore()
 
   const efficiencyData = useMemo(() => {
     const modeWeight = MODE_CONFIG[modeIndex].weight
@@ -408,12 +693,13 @@ export default function Board() {
       (s, id) => s + (cubes.find(c => c.id === id)?.risk ?? 0), 0
     )
 
-    // Efficiency Score = (Total Gain × Mode Weight) / (Step Count + Crit Risk)
-    const denominator = stepCount + critRisk
+    // Efficiency Score = (Total Gain × Mode Weight) / (Step Count + Crit Risk + Doomsday Penalty)
+    const doomPenalty = isDoomsdayActive ? (preMortemData?.risk_index ?? 50) : 0
+    const denominator = stepCount + critRisk + doomPenalty
     const score = denominator > 0 ? (totalGain * modeWeight) / denominator : 0
 
     return { score, totalGain, stepCount, critRisk, modeWeight }
-  }, [connections, activeSet, criticalPath, cubes, modeIndex])
+  }, [connections, activeSet, criticalPath, cubes, modeIndex, isDoomsdayActive, preMortemData])
 
   const selectedCube = selectedFaceInfo ? cubes.find(c => c.id === selectedFaceInfo.cubeId) : null
 
@@ -670,6 +956,52 @@ export default function Board() {
     setTimeout(() => setRoutePhase('idle'), 2500)
   }, [cubes, activeSet, modeIndex])
 
+  // ── 끊긴 연결선 (Critical Path 중 가장 위험한 엣지) ──────────────────────────
+  const severedConnId = useMemo(() => {
+    if (!isDoomsdayActive || criticalPath.length < 2) return null
+    let maxEdgeRisk = -1
+    let result: string | null = null
+    for (let i = 0; i < criticalPath.length - 1; i++) {
+      const fromId = criticalPath[i]
+      const toId   = criticalPath[i + 1]
+      const conn = connections.find(c =>
+        (c.from_cube_id === fromId && c.to_cube_id === toId) ||
+        (c.from_cube_id === toId   && c.to_cube_id === fromId)
+      )
+      if (conn) {
+        const rA = cubes.find(c => c.id === fromId)?.risk ?? 0
+        const rB = cubes.find(c => c.id === toId)?.risk ?? 0
+        if (rA + rB > maxEdgeRisk) { maxEdgeRisk = rA + rB; result = conn.id }
+      }
+    }
+    return result
+  }, [isDoomsdayActive, criticalPath, connections, cubes])
+
+  // ── JSON Inbox → 큐브 소환 핸들러 ────────────────────────────────────────────
+  const handleSpawnCubes = useCallback(async (specs: ParsedCubeSpec[]) => {
+    const startIdx = cubes.length
+    for (let i = 0; i < specs.length; i++) {
+      const spec = specs[i]
+      const pos  = getSpawnPos(startIdx + i)
+      const { data } = await supabase.from('cubes').insert({
+        board_id:   BOARD_ID,
+        position_x: pos.x + (Math.random() - 0.5) * 2,
+        position_y: 0,
+        position_z: pos.z + (Math.random() - 0.5) * 2,
+        identity:   spec.name    ?? '',
+        output:     spec.green   ?? '',
+        input:      spec.yellow  ?? '',
+        barrier:    spec.red     ?? '',
+        logic:      spec.blue    ?? '',
+        history:    spec.black   ?? '',
+        is_root:    false,
+        is_goal:    false,
+        risk:       0.3,
+      }).select().single()
+      if (data) setCubes(p => [...p, data as CubeRow])
+    }
+  }, [cubes.length])
+
   // ── 렌더 ──────────────────────────────────────────────────────────────────
 
   if (isLoading) {
@@ -709,9 +1041,20 @@ export default function Board() {
           const from = cubes.find(c => c.id === conn.from_cube_id)
           const to   = cubes.find(c => c.id === conn.to_cube_id)
           if (!from || !to) return null
-          const isCrit = criticalConnIds.has(conn.id)
+          const isCrit     = criticalConnIds.has(conn.id)
+          const isSevered  = conn.id === severedConnId
           const fromActive = activeSet.has(conn.from_cube_id)
           const toActive   = activeSet.has(conn.to_cube_id)
+
+          if (isSevered) {
+            return (
+              <GlitchLine
+                key={conn.id}
+                from={getPortWorldPos(from, conn.from_face as FaceLabel)}
+                to={getPortWorldPos(to, conn.to_face as FaceLabel)}
+              />
+            )
+          }
           return (
             <Line
               key={conn.id}
@@ -721,6 +1064,12 @@ export default function Board() {
             />
           )
         })}
+
+        {/* 둠스데이: 비상등 + 떨어지는 큐브 */}
+        <EmergencyLight active={isDoomsdayActive} />
+        {isDoomsdayActive && preMortemData && (
+          <DoomCubeEntity name={preMortemData.name} />
+        )}
 
         {/* ── 탐색 애니메이션 후보 선 ── */}
         {explorationLines.map((line, i) => {
@@ -763,6 +1112,22 @@ export default function Board() {
           onClick={handleAutoRoute}
         />
       </div>
+
+      {/* ── JSON Inbox Panel (좌측 슬라이드 패널) ── */}
+      <InboxPanel onSpawn={handleSpawnCubes} />
+
+      {/* ── ☠️ Kill Switch (우측 하단) ── */}
+      {preMortemData && !isDoomsdayActive && (
+        <DoomKillSwitch
+          name={preMortemData.name}
+          onActivate={() => setIsDoomsdayActive(true)}
+        />
+      )}
+
+      {/* ── FATAL ERROR 오버레이 ── */}
+      {isDoomsdayActive && preMortemData && (
+        <FatalErrorOverlay data={preMortemData} onDismiss={() => setIsDoomsdayActive(false)} />
+      )}
 
       {/* ── Add Cube ── */}
       <button

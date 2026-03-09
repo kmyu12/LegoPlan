@@ -26,3 +26,38 @@ export const useStrategyStore = create<StrategyStore>((set) => ({
   modeIndex: 1,
   setMode: (modeIndex) => set({ modeIndex }),
 }))
+
+// ─── Doomsday / Pre-Mortem Store ────────────────────────────────────────────
+
+export interface PreMortemData {
+  name:        string
+  fatal_cause: string
+  risk_index:  number
+}
+
+/** JSON Inbox 파싱 결과 — 일반 큐브 스펙 */
+export interface ParsedCubeSpec {
+  name?:   string
+  green?:  string
+  yellow?: string
+  red?:    string
+  blue?:   string
+  white?:  string
+  black?:  string
+}
+
+interface DoomsdayStore {
+  preMortemData:      PreMortemData | null
+  isDoomsdayActive:   boolean
+  setPreMortemData:   (data: PreMortemData | null) => void
+  setIsDoomsdayActive:(v: boolean) => void
+  resetDoomsday:      () => void
+}
+
+export const useDoomsdayStore = create<DoomsdayStore>((set) => ({
+  preMortemData:      null,
+  isDoomsdayActive:   false,
+  setPreMortemData:   (data)  => set({ preMortemData: data }),
+  setIsDoomsdayActive:(v)     => set({ isDoomsdayActive: v }),
+  resetDoomsday:      ()      => set({ isDoomsdayActive: false, preMortemData: null }),
+}))
