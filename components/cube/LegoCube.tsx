@@ -1,9 +1,10 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useRef, useState, useEffect } from 'react'
 import { Canvas, useFrame, ThreeEvent } from '@react-three/fiber'
 import { OrbitControls, Text } from '@react-three/drei'
 import * as THREE from 'three'
+import { supabase } from '@/lib/supabase'
 
 // PDF 기반 6면 정의 - 에디톨로지 전략 포트
 // Z-fighting 방지: 큐브 본체(±1.0)보다 0.002 바깥으로 면을 배치
@@ -18,6 +19,35 @@ const FACE_CONFIG = [
 ]
 
 type FaceLabel = 'OUTPUT' | 'INPUT' | 'BARRIER' | 'LOGIC' | 'IDENTITY' | 'HISTORY'
+
+// 각 면 중앙의 연결 포트 구체
+function ConnectionPort({ faceLabel }: { faceLabel: string }) {
+  const [hovered, setHovered] = useState(false)
+  const meshRef = useRef<THREE.Mesh>(null)
+
+  useFrame((_, delta) => {
+    if (!meshRef.current) return
+    // 호버 시 살짝 커지는 애니메이션
+    const target = hovered ? 1.4 : 1.0
+    meshRef.current.scale.lerp(new THREE.Vector3(target, target, target), delta * 8)
+  })
+
+  return (
+    <mesh
+      ref={meshRef}
+      position={[0, 0, 0.12]}
+      onPointerOver={(e) => { e.stopPropagation(); setHovered(true) }}
+      onPointerOut={() => setHovered(false)}
+    >
+      <sphereGeometry args={[0.07, 16, 16]} />
+      <meshStandardMaterial
+        color={faceLabel === 'IDENTITY' ? '#0f172a' : '#ffffff'}
+        roughness={0.4}
+        metalness={0}
+      />
+    </mesh>
+  )
+}
 
 function FacePlane({
   config,
@@ -50,8 +80,12 @@ function FacePlane({
           polygonOffsetUnits={-1}
         />
       </mesh>
+
+      {/* 연결 포트 — 나중에 큐브 간 선 연결의 기준점 */}
+      <ConnectionPort faceLabel={config.label} />
+
       <Text
-        position={[0, 0.18, 0.01]}
+        position={[0, 0.5, 0.01]}
         fontSize={0.2}
         color={config.label === 'IDENTITY' ? '#0f172a' : '#ffffff'}
         anchorX="center"
@@ -61,7 +95,7 @@ function FacePlane({
         {config.label}
       </Text>
       <Text
-        position={[0, -0.15, 0.01]}
+        position={[0, 0.22, 0.01]}
         fontSize={0.13}
         color={config.label === 'IDENTITY' ? '#334155' : '#e2e8f0'}
         anchorX="center"
@@ -116,17 +150,94 @@ const FACE_META: Record<FaceLabel, { title: string; placeholder: string; emoji: 
   HISTORY:  { emoji: '⚫', title: '밑면 — History (Black)', placeholder: '증거 데이터, 과거 지표를 적어...' },
 }
 
+const PROJECT_ID = 'default'
+
+const EMPTY_DATA: Record<FaceLabel, string> = {
+  OUTPUT: '', INPUT: '', BARRIER: '', LOGIC: '', IDENTITY: '', HISTORY: '',
+}
+
 export default function LegoCubeScene() {
   const [selectedFace, setSelectedFace] = useState<FaceLabel | null>(null)
-  const [faceData, setFaceData] = useState<Record<FaceLabel, string>>({
-    OUTPUT: '', INPUT: '', BARRIER: '', LOGIC: '', IDENTITY: '', HISTORY: '',
-  })
+  const [faceData, setFaceData] = useState<Record<FaceLabel, string>>(EMPTY_DATA)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
+
+  // DB 행 → 상태로 변환
+  const applyRow = (row: Record<string, string>) => {
+    setFaceData({
+      OUTPUT:   row.output   ?? '',
+      INPUT:    row.input    ?? '',
+      BARRIER:  row.barrier  ?? '',
+      LOGIC:    row.logic    ?? '',
+      IDENTITY: row.identity ?? '',
+      HISTORY:  row.history  ?? '',
+    })
+  }
+
+  // 최초 로드 + 실시간 구독
+  useEffect(() => {
+    const loadData = async () => {
+      const { data } = await supabase
+        .from('projects')
+        .select('*')
+        .eq('id', PROJECT_ID)
+        .single()
+      if (data) applyRow(data)
+      setIsLoading(false)
+    }
+    loadData()
+
+    const channel = supabase
+      .channel('projects_realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'projects', filter: `id=eq.${PROJECT_ID}` },
+        (payload) => {
+          if (payload.new) applyRow(payload.new as Record<string, string>)
+        }
+      )
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [])
+
+  // 저장 버튼
+  const handleSave = async () => {
+    setIsSaving(true)
+    setSaveStatus('idle')
+    const { error } = await supabase.from('projects').upsert({
+      id:       PROJECT_ID,
+      output:   faceData.OUTPUT,
+      input:    faceData.INPUT,
+      barrier:  faceData.BARRIER,
+      logic:    faceData.LOGIC,
+      identity: faceData.IDENTITY,
+      history:  faceData.HISTORY,
+      updated_at: new Date().toISOString(),
+    })
+    setIsSaving(false)
+    if (error) {
+      setSaveStatus('error')
+    } else {
+      setSaveStatus('saved')
+      setTimeout(() => { setSaveStatus('idle'); setSelectedFace(null) }, 800)
+    }
+  }
 
   const handleFaceSelect = (label: FaceLabel) =>
     setSelectedFace((prev) => (prev === label ? null : label))
 
   const filledCount = Object.values(faceData).filter((v) => v.trim().length > 0).length
   const lodPercent = [0, 10, 20, 40, 55, 70, 100][filledCount] ?? 100
+
+  if (isLoading) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center" style={{ background: '#121212' }}>
+        <div className="text-slate-400 text-sm animate-pulse">Loading...</div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-screen w-full text-white overflow-hidden" style={{ background: '#121212' }}>
@@ -206,10 +317,17 @@ export default function LegoCubeScene() {
             />
 
             <button
-              onClick={() => setSelectedFace(null)}
-              className="mt-4 w-full bg-indigo-600 hover:bg-indigo-500 transition-colors rounded-xl py-2.5 text-sm font-semibold"
+              onClick={handleSave}
+              disabled={isSaving}
+              className={`mt-4 w-full transition-colors rounded-xl py-2.5 text-sm font-semibold disabled:opacity-50 ${
+                saveStatus === 'saved'
+                  ? 'bg-green-600'
+                  : saveStatus === 'error'
+                  ? 'bg-red-600'
+                  : 'bg-indigo-600 hover:bg-indigo-500'
+              }`}
             >
-              저장
+              {isSaving ? '저장 중...' : saveStatus === 'saved' ? '✓ 저장됨' : saveStatus === 'error' ? '저장 실패' : '저장'}
             </button>
           </div>
         )}

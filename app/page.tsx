@@ -1,5 +1,5 @@
-import LegoCubeScene from '@/components/cube/LegoCube'
+import Board from '@/components/cube/Board'
 
 export default function Home() {
-  return <LegoCubeScene />
+  return <Board />
 }
